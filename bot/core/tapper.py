@@ -1,17 +1,18 @@
 import asyncio
 import base64
-import hashlib
+import json
 import random
 import sys
+import time
 import traceback
-from time import time
 from urllib.parse import unquote
 
 import aiohttp
-import cloudscraper
+import requests
 from aiocfscrape import CloudflareScraper
 from aiohttp_proxy import ProxyConnector
 from better_proxy import Proxy
+import cloudscraper
 from pyrogram import Client
 from pyrogram.errors import Unauthorized, UserDeactivated, AuthKeyUnregistered, FloodWait
 from pyrogram.raw.types import InputBotAppShortName
@@ -23,72 +24,36 @@ from bot.utils import logger
 from bot.exceptions import InvalidSession
 from .headers import headers
 from random import randint
+from datetime import datetime
 from bot.utils.ps import check_base_url
 from bot.utils import launcher as lc
+from bot.core.payload.get_pl import get_payload
 
-end_point = "https://api.bums.bot/miniapps/api"
-login_api = f"{end_point}/user/telegram_auth"
-user_info_api = f"{end_point}/user_game_level/getGameInfo?invitationCode="
-task_list_api = f"{end_point}/task/lists"
-user_prop_api = f"{end_point}/user_prop/Lists?page=1&pageSize=100,get"
-gang_list_api = f"{end_point}/gang/gang_lists,post"
-prop_shop_api = f"{end_point}/prop_shop/Lists?showPages=discount_1&page=1&pageSize=10,get"
+lock = asyncio.Lock()
+user_end_point = "https://user-domain.blum.codes/api/v1"
+game_end_point = "https://game-domain.blum.codes/api/v1"
+tribe_end_point = "https://tribe-domain.blum.codes/api/v1"
+game_end_point_v2 = "https://game-domain.blum.codes/api/v2"
+tasks_end_point = "https://earn-domain.blum.codes/api/v1"
 
-gang_payload = {
-    "boostNum": 100,
-    "powerNum": 0,
-    "inviteNum": 0
-}
+token_api = "https://user-domain.blum.codes/api/v1/auth/provider/PROVIDER_TELEGRAM_MINI_APP"
+refesh_token_api = f"{user_end_point}/auth/refresh"
+me_api = f"{user_end_point}/user/me"
+friend_balance_api = f"{user_end_point}/friends/balance"
+time_api = f"{game_end_point}/time/now"
+user_balance_api = f"{game_end_point}/user/balance"
+daily_rw_api = f"{game_end_point}/daily-reward?offset=-420"
+tribe_api = f"{tribe_end_point}/tribe/16ff530b-e219-41a9-a9e5-cf2275c5663d/join"
+tribe_info_api = f"{tribe_end_point}/tribe/my"
+dogs_eligible_api = f"{game_end_point_v2}/game/eligibility/dogs_drop"
+start_farm_api = f"{game_end_point}/farming/start"
+tasks_api = f"{tasks_end_point}/tasks"
+claim_farm_api = f"{game_end_point}/farming/claim"
+start_game_api = f"{game_end_point_v2}/game/play"
+claim_game_api = f"{game_end_point_v2}/game/claim"
+friend_claim_api = f"{user_end_point}/friends/claim"
 
-basic_info = [user_prop_api, gang_list_api, prop_shop_api]
 
-get_skin_api = f"{end_point}/user_game_level/getDurovSkinActive,get"
-event_api = f"{end_point}/active_christmas/read,post"
-active_event_api = f"{end_point}/active/info,get"
-get_bot_msg_api = f"{end_point}/user_game/getBotMessageId,post"
-get_event_api = f"{end_point}/active/get_historical_events,get"
-get_active_info_api = f"{end_point}/user_game_level/getActiveInfo,post"
-
-payload = {
-    "read": {
-        "id": 0
-    },
-    "getBotMessageId": {
-        "type": "hbb"
-    },
-    "getActiveInfo": {
-        "type": "hbb"
-    }
-}
-
-others_basic_info = [get_skin_api, event_api, active_event_api, get_bot_msg_api, get_event_api, get_active_info_api]
-
-finish_task_api = f"{end_point}/task/finish_task"
-get_sign_api = f"{end_point}/sign/getSignLists"
-sign_api = f"{end_point}/sign/sign"
-
-get_boxes_api = f"{end_point}/prop_shop/Lists?showPages=spin&page=1&pageSize=10"
-create_pay_order_api = f"{end_point}/prop_shop/CreateGptPayOrder"
-start_buy_api = f"{end_point}/game_spin/Start"
-
-get_my_gang_api = f"{end_point}/gang/gang_lists"
-join_gang_api = f"{end_point}/gang/gang_join"
-
-get_cards_info_api = f"{end_point}/mine/getMineLists"
-upgrade_card_api = f"{end_point}/mine/upgrade"
-
-upgrade_misc_api = f"{end_point}/user_game_level/upgradeLeve"
-
-zombie_lvl_api = f"{end_point}/game_slot/zombie"
-stamina_api = f"{end_point}/game_slot/stamina"
-play_spin_api = f"{end_point}/game_slot/start"
-
-tap_api = f"{end_point}/user_game/collectCoin"
-
-def generate_hash(collectAmount, collectSeqNo):
-    input_string = f"{collectAmount}{collectSeqNo}7be2a16a82054ee58398c5edb7ac4a5a"
-    hash_string = hashlib.md5(input_string.encode()).hexdigest()
-    return hash_string
 class Tapper:
     def __init__(self, tg_client: Client, multi_thread: bool):
         self.multi_thread = multi_thread
@@ -98,16 +63,17 @@ class Tapper:
         self.last_name = ''
         self.user_id = ''
         self.auth_token = ""
-        self.access_token = ""
         self.logged = False
-        self.refresh_token_ = ""
         self.user_data = None
         self.auth_token = None
         self.my_ref = get_()
-        self.invite = 0
-        self.coin_balance = 0
-        self.seqNo = 0
-        self.coin_per_tap = 0
+        self.access_token = None
+        self.refresh_token = None
+        self.game_uuid = None
+        self.play_passes = 0
+        self.user_balance = 0
+        self.dogs_eligible = False
+        self.end_farm_time = 0
 
     async def get_tg_web_data(self, proxy: str | None) -> str:
         try:
@@ -120,6 +86,7 @@ class Tapper:
             sys.exit()
 
         actual = random.choices([self.my_ref, ref_param], weights=[30, 70], k=1)
+        self.my_ref = actual[0]
         if proxy:
             proxy = Proxy.from_str(proxy)
             proxy_dict = dict(
@@ -143,7 +110,7 @@ class Tapper:
 
             while True:
                 try:
-                    peer = await self.tg_client.resolve_peer('bums')
+                    peer = await self.tg_client.resolve_peer('BlumCryptoBot')
                     break
                 except FloodWait as fl:
                     fls = fl.value
@@ -160,8 +127,6 @@ class Tapper:
                 write_allowed=True,
                 start_param=actual[0]
             ))
-
-            self.my_ref = actual[0].split("_")[1]
 
             auth_url = web_view.url
             # print(auth_url)
@@ -181,6 +146,30 @@ class Tapper:
                          f"{error}")
             await asyncio.sleep(delay=3)
 
+    @staticmethod
+    def is_expired(token):
+        if token is None or isinstance(token, bool):
+            return True
+        header, payload, sign = token.split(".")
+        payload = base64.b64decode(payload + "==").decode()
+        jload = json.loads(payload)
+        now = round(datetime.now().timestamp()) + 300
+        exp = jload["exp"]
+        if now > exp:
+            return True
+
+        return False
+
+    async def modify_json(self, data_to_update):
+        async with lock:
+            with open("token.json", 'r') as f:
+                accounts_data = json.load(f)
+
+            accounts_data.update(data_to_update)
+
+            with open("token.json", 'w') as f:
+                json.dump(accounts_data, f, indent=4)
+
     async def check_proxy(self, http_client: aiohttp.ClientSession, proxy: Proxy) -> None:
         try:
             response = await http_client.get(url='https://ipinfo.io/json', timeout=aiohttp.ClientTimeout(20))
@@ -194,420 +183,384 @@ class Tapper:
         except Exception as error:
             logger.error(f"{self.session_name} | Proxy: {proxy} | Error: {error}")
 
-    async def login(self, session: cloudscraper.CloudScraper):
-        data = {
-            "invitationCode": self.my_ref,
-            "initData": self.auth_token,
-            "act": ""
+    async def get_token(self, http_client: cloudscraper.CloudScraper):
+        payload = {
+            "query": self.auth_token,
+            "referralToken": self.my_ref
         }
         try:
-            res = session.post(login_api, data=data)
-            res.raise_for_status()
-            data1 = res.json()
-            if data1['code'] == 0:
-                logger.success(f"{self.session_name} | <green>Successfully logged in!</green>")
-                return data1['data']
-            else:
-                logger.warning(f"{self.session_name} | <yellow>Failed to login!</yellow>")
-                return None
-        except Exception as e:
-            logger.warning(f"{self.session_name} | Unknown error while trying to login: {e}")
-
-    async def get_info(self, session: cloudscraper.CloudScraper):
-        try:
-            res = session.get(f"{user_info_api}{self.my_ref}")
-            res.raise_for_status()
-            if res.json()["code"] == 0:
-                self.coin_balance = int(res.json()['data']['gameInfo']['coin'])
-                return res.json()['data']
-            else:
-                logger.warning(f"{self.session_name} | Failed to get game info: {res.status_code}")
-                return None
-
-        except Exception as e:
-            logger.warning(f"{self.session_name} | Unknown error while trying to get game info: {e}")
-            return None
-
-    async def update_balance(self, session: cloudscraper.CloudScraper):
-        try:
-            res = session.get(f"{user_info_api}{self.my_ref}")
-            res.raise_for_status()
-            if res.json()["code"] == 0:
-                self.coin_balance = int(res.json()['data']['gameInfo']['coin'])
-            else:
-                logger.warning(f"{self.session_name} | Failed to get game info: {res.status_code}")
-                return None
-
-        except Exception as e:
-            logger.warning(f"{self.session_name} | Unknown error while trying to get game info: {e}")
-            return None
-
-    async def get_task_list(self, session: cloudscraper.CloudScraper):
-        try:
-            logger.info(f"{self.session_name} | Trying to get task list...")
-            res = session.get(task_list_api)
-            res.raise_for_status()
-            if res.json()["code"] == 0:
-                return res.json()['data']['lists']
-            else:
-                logger.warning(f"{self.session_name} | getting task info: {res.status_code}")
-                return None
-
-        except Exception as e:
-
-            logger.warning(f"{self.session_name} | Unknown error while trying to get task info: {e}")
-            return None
-
-    async def get_basic_info(self, session: cloudscraper.CloudScraper):
-        try:
-            logger.info(f"{self.session_name} | Trying to get basic info...")
-            for api in basic_info:
-                url = api.split(",")[0]
-                method = api.split(",")[1]
-                if method == "get":
-                    session.get(url)
-                else:
-                    session.post(url, data=gang_payload)
-
-        except Exception as e:
-            logger.warning(f"{self.session_name} | Unknown error while trying to get basic info: {e}")
-            return None
-
-    async def get_other_basic_info(self, session: cloudscraper.CloudScraper):
-        try:
-            logger.info(f"{self.session_name} | Trying to get others basic info...")
-            for api in others_basic_info:
-                url = api.split(",")[0]
-                method = api.split(",")[1]
-                if method == "get":
-                    session.get(url)
-                else:
-                    data = payload[url.split("/")[-1]]
-                    session.post(url, data=data)
-
-
-        except Exception as e:
-            logger.warning(f"{self.session_name} | Unknown error while trying to get basic info: {e}")
-            return None
-
-    async def do_task(self, task, session: cloudscraper.CloudScraper):
-        data = {
-            "id": task['id']
-        }
-        try:
-            logger.info(f"{self.session_name} | Attempt to complete <c>{task['name']}</c>")
-            res = session.post(finish_task_api, data=data)
-            res.raise_for_status()
-            if res.json()["code"] == 0:
-                logger.success(
-                    f"{self.session_name} | <green>Successfully completed <c>{task['name']}</c> - Earned <c>{task['rewardParty']}</c></green>")
-            else:
-                logger.warning(f"{self.session_name} | Failed to complete {task['name']}: <y>{res.json()['msg']}</y>")
-                return None
-
-        except Exception as e:
-            logger.warning(f"{self.session_name} | Unknown error while trying to complete task: {e}")
-            return None
-
-    async def get_sign_status(self, session: cloudscraper.CloudScraper):
-        try:
-            res = session.get(get_sign_api)
-            res.raise_for_status()
-            if res.json()["code"] == 0:
-                login_data = res.json()['data']
-                logger.info(f"{self.session_name} | Current login streak: <c>{login_data['signNum']}</c>")
-                return login_data['signStatus']
-            else:
-                return 1
-
-        except Exception as e:
-            logger.warning(f"{self.session_name} | Unknown error while trying to get sign data: {e}")
-            return 1
-
-    async def claim_daily_rw(self, session: cloudscraper.CloudScraper):
-        try:
-            res = session.post(sign_api)
-            res.raise_for_status()
-            if res.json()["code"] == 0:
-                logger.success(f"{self.session_name} | <green>Successfully claimed daily reward</green>")
-            else:
-                logger.warning(f"{self.session_name} | Failed to claim daily reward: {res.status_code}")
-
-        except Exception as e:
-            logger.warning(f"{self.session_name} | Unknown error while trying to claim daily reward: {e}")
-            return
-
-    async def get_boxes_info(self, session: cloudscraper.CloudScraper):
-        try:
-            res = session.get(get_boxes_api)
-            res.raise_for_status()
-            if res.json()["code"] == 0:
-                return res.json()['data']
-            else:
-                logger.warning(f"{self.session_name} | Failed to get boxes info: {res.status_code}")
-                return None
-
-        except Exception as e:
-            logger.warning(f"{self.session_name} | Unknown error while trying to get boxes info: {e}")
-            return None
-
-    async def buy_free_box(self, box, session: cloudscraper.CloudScraper):
-        try:
-            logger.info(f"{self.session_name} | Attempting to claim free box.")
-            data = {
-                "num": 1,
-                "propShopSellId": box['sellLists'][0]['id']
-            }
-            res = session.post(create_pay_order_api, data=data)
-            res.raise_for_status()
-            if res.json()["code"] == 0:
-                logger.success(f"{self.session_name} | <green>Successfully created an order!</green>")
-                data1 = {
-                    "count": 1,
-                    "propId": box['propId']
-                }
-                res = session.post(start_buy_api, data=data1)
-                if res.status_code == 200:
-                    reward = res.json()['rewardLists'][0]
+            token = http_client.post(token_api, json=payload)
+            if token.status_code == 200:
+                token_res = token.json()
+                token_info = token_res['token']
+                if token_res['justCreated']:
                     logger.success(
-                        f"{self.session_name} | <green>Sucessfully claimed <c>{reward['name']}</c> from free box!</green>")
-                    return
-            else:
-                logger.warning(f"{self.session_name} | Failed to get boxes info: {res.status_code}")
-                return None
+                        f"{self.session_name} | <green>Account created successfully! - UUID: <cyan>{token_info['user']['id']['id']}</cyan></green>")
+                else:
+                    logger.info(f"{self.session_name} | <green>Successfully got new access token!</green>")
 
-        except Exception as e:
-            logger.warning(f"{self.session_name} | Unknown error while trying to get boxes info: {e}")
-            return None
+                self.access_token = token_info['access']
+                self.refresh_token = token_info['refresh']
 
-    async def check_gang(self, session: cloudscraper.CloudScraper):
-        try:
-            res = session.post(get_my_gang_api, data=gang_payload)
-            res.raise_for_status()
-            if res.json()["code"] == 0:
-                my_gang = res.json()['data']['myGang']
-                if my_gang['gangId'] == "":
-                    return False
+                user_data = {self.session_name: {
+                    "access": self.access_token,
+                    "refresh": self.refresh_token
+                }}
+
+                await self.modify_json(user_data)
+
                 return True
             else:
-                logger.warning(f"{self.session_name} | Failed to get gang data: {res.status_code}")
+                logger.warning(f"{self.session_name} | Get token failed: {token.status_code}")
+                return False
+
+        except Exception as e:
+            logger.warning(f"{self.session_name} | Unknown error while trying to get token: {e}")
+            return False
+
+    async def refresh_token_func(self, http_client: cloudscraper.CloudScraper, proxy):
+        payload = {
+            "refresh": self.refresh_token
+        }
+        try:
+            refresh = http_client.post(refesh_token_api, json=payload)
+            if refresh.status_code == 200:
+                logger.success(f"{self.session_name} | <green>Access token refreshed successfully!</green>")
+                token_info = refresh.json()
+                self.access_token = token_info['access']
+                self.refresh_token = token_info['refresh']
+
+                user_data = {self.session_name: {
+                    "access": self.access_token,
+                    "refresh": self.refresh_token
+                }}
+
+                await self.modify_json(user_data)
+
                 return True
+            elif refresh.status_code == 401:
+                tg_web_data = await self.get_tg_web_data(proxy=proxy)
+                self.auth_token = tg_web_data
+                return await self.get_token(http_client)
+            else:
+                logger.warning(f"{self.session_name} | <yellow>Failed to refresh token: <red>{refresh.status_code}</red></yellow>")
+                return False
 
         except Exception as e:
-            logger.warning(f"{self.session_name} | Unknown error while trying to get gang data: {e}")
-            return True
+            logger.warning(f"{self.session_name} | Unknown error during refreshing access token: {e}")
+            return False
 
-    async def join_gang(self, name, session: cloudscraper.CloudScraper):
+    async def get_basic_info(self, http_client: cloudscraper.CloudScraper):
         try:
-            data = {
-                "name": name
-            }
-            res = session.post(join_gang_api, data=data)
-            res.raise_for_status()
-            if res.json()["code"] == 0:
-                logger.success(f"{self.session_name} | <green>Successfully join <c>{name}</c> gang!</green>")
+            me = http_client.get(me_api)
+            if me.status_code == 200:
+                logger.success(f"{self.session_name} | <green>Get basic info successfully!</green>")
+                info = me.json()
+                self.game_uuid = info['id']['id']
+
+                return self.game_uuid
+            elif me.status_code == 401:
+                logger.warning(
+                    f"{self.session_name} | <yellow>Failed to get basic info: <red>Access token expired</red></yellow>")
+                return None
             else:
-                logger.warning(f"{self.session_name} | Failed to join gang: {res.status_code}")
-
-        except Exception as e:
-            logger.warning(f"{self.session_name} | Unknown error while trying to join gang: {e}")
-
-    async def get_best_available_card(self, session: cloudscraper.CloudScraper):
-        try:
-            res = session.post(get_cards_info_api)
-            res.raise_for_status()
-            if res.json()["code"] == 0:
-                card_data = res.json()['data']
-                self.invite = card_data['invite']
-                available_cards = []
-                for card in card_data['lists']:
-                    if card.get("status") == 1 and self.coin_balance >= int(card['nextLevelCost']):
-                        available_cards.append(card)
-
-                if len(available_cards) == 0:
-                    return []
-
-                best_cards = []
-                for card in available_cards:
-                    profit = int(card['distance']) / int(card['nextLevelCost'])
-                    best_cards.append({'profit': profit, 'card': card})
-
-                sorted_best_cards = sorted(best_cards, key=lambda x: x['profit'], reverse=True)
-                return sorted_best_cards[0]['card']
-            else:
-                logger.warning(f"{self.session_name} | Failed to get available cards: {res.status_code}")
+                logger.warning(
+                    f"{self.session_name} | <yellow>Failed to get basic info: <red>{me.status_code}</red></yellow>")
                 return None
 
         except Exception as e:
-            logger.warning(f"{self.session_name} | Unknown error while trying to get available cards: {e}")
+            logger.warning(f"{self.session_name} | Unknown error during getting account info: {e}")
             return None
 
-    async def upgrade_card(self, card, session: cloudscraper.CloudScraper):
+    async def get_friend_balance(self, http_client: cloudscraper.CloudScraper):
         try:
-            data = {
-                "mineId": card['mineId']
-            }
-            res = session.post(upgrade_card_api, data=data)
-            res.raise_for_status()
-            if res.json()["code"] == 0:
-                logger.success(
-                    f"{self.session_name} | <green>Successfully upgraded <c>{card['mineId']}</c> to lvl <red>{card['level'] + 1}</red> - Used <yellow>{card['nextLevelCost']}</yellow> coin!</green>")
+            friends = http_client.get(friend_balance_api)
+            if friends.status_code == 200:
+                info = friends.json()
+                return info
             else:
-                logger.warning(f"{self.session_name} | Failed to upgrade card: {res.status_code}")
+                logger.warning(
+                    f"{self.session_name} | <yellow>Failed to get friends balance: <red>{friends.status_code}</red></yellow>")
+                return None
 
         except Exception as e:
-            logger.warning(f"{self.session_name} | Unknown error while trying to upgrade card: {e}")
-
-    async def upgrade_misc(self, tap_info, session: cloudscraper.CloudScraper):
-        try:
-            if settings.AUTO_UPGRADE_TAP and tap_info['tap']['level'] < settings.TAP_MAX_LVL:
-                data = {
-                    "type": "tap"
-                }
-                res = session.post(upgrade_misc_api, data=data)
-                res.raise_for_status()
-                if res.json()["code"] == 0:
-                    logger.success(
-                        f"{self.session_name} | <green>Successfully upgraded <c>Tap</c> to lvl <red>{tap_info['tap']['level'] + 1}</red> - Used <yellow>{tap_info['tap']['nextCostCoin']}</yellow> coin!</green>")
-                    await asyncio.sleep(randint(3, 5))
-                else:
-                    logger.warning(f"{self.session_name} | Failed to upgrade Tap: {res.status_code}")
-
-            if settings.AUTO_UPGRADE_ENERGY and tap_info['energy']['level'] < settings.ENERGY_MAX_LVL:
-                data = {
-                    "type": "energy"
-                }
-                res = session.post(upgrade_misc_api, data=data)
-                res.raise_for_status()
-                if res.json()["code"] == 0:
-                    logger.success(
-                        f"{self.session_name} | <green>Successfully upgraded <c>energy</c> to lvl <red>{tap_info['energy']['level'] + 1}</red> - Used <yellow>{tap_info['energy']['nextCostCoin']}</yellow> coin!</green>")
-                    await asyncio.sleep(randint(3, 5))
-                else:
-                    logger.warning(f"{self.session_name} | Failed to upgrade energy: {res.status_code}")
-
-            if settings.AUTO_UPGRADE_CRIT_MULTI and tap_info['bonusRatio']['level'] < settings.CRIT_MULTI_MAX_LVL:
-                data = {
-                    "type": "bonusRatio"
-                }
-                res = session.post(upgrade_misc_api, data=data)
-                res.raise_for_status()
-                if res.json()["code"] == 0:
-                    logger.success(
-                        f"{self.session_name} | <green>Successfully upgraded <c>crit multi</c> to lvl <red>{tap_info['bonusRatio']['level'] + 1}</red> - Used <yellow>{tap_info['bonusRatio']['nextCostCoin']}</yellow> coin!</green>")
-                    await asyncio.sleep(randint(3, 5))
-                else:
-                    logger.warning(f"{self.session_name} | Failed to upgrade crit multi: {res.status_code}")
-
-            if settings.AUTO_UPGRADE_RECOVERY and tap_info['recovery']['level'] < settings.RECOVERY_MAX_LVL:
-                data = {
-                    "type": "recovery"
-                }
-                res = session.post(upgrade_misc_api, data=data)
-                res.raise_for_status()
-                if res.json()["code"] == 0:
-                    logger.success(
-                        f"{self.session_name} | <green>Successfully upgraded <c>recovery</c> to lvl <red>{tap_info['recovery']['level'] + 1}</red> - Used <yellow>{tap_info['recovery']['nextCostCoin']}</yellow> coin!</green>")
-                    await asyncio.sleep(randint(3, 5))
-                else:
-                    logger.warning(f"{self.session_name} | Failed to upgrade recovery: {res.status_code}")
-
-            if settings.AUTO_UPGRADE_JACKPOT_CHANCE and tap_info['bonusChance']['level'] < settings.RECOVERY_MAX_LVL:
-                data = {
-                    "type": "bonusChance"
-                }
-                res = session.post(upgrade_misc_api, data=data)
-                res.raise_for_status()
-                if res.json()["code"] == 0:
-                    logger.success(
-                        f"{self.session_name} | <green>Successfully upgraded <c>jackpot chance</c> to lvl <red>{tap_info['bonusChance']['level'] + 1}</red> - Used <yellow>{tap_info['bonusChance']['nextCostCoin']}</yellow> coin!</green>")
-                    await asyncio.sleep(randint(3, 5))
-                else:
-                    logger.warning(f"{self.session_name} | Failed to upgrade jackpot chance: {res.status_code}")
-
-        except Exception as e:
-            logger.warning(f"{self.session_name} | Unknown error while trying to upgrade misc: {e}")
-
-    def caculate_stamina(self, stamina):
-        c50 = stamina//50
-        c10 = stamina%50//10
-        c3 = stamina%10//3
-        c2 = stamina%3//2
-        if c50 > 0:
-            return 50
-        elif c10 > 0:
-            return 10
-        elif c3 > 0:
-            return 3
-        elif c2 > 0:
-            return 2
-        else:
-            return 1
-
-    async def play_spin(self, session: cloudscraper.CloudScraper):
-        session.get(zombie_lvl_api)
-        res = session.get(stamina_api)
-        if res.json()['code'] == 0:
-            stamina = res.json()['data']['staminaNow']
-            while stamina > 0:
-                count = self.caculate_stamina(stamina)
-                data = {
-                    "count": count
-                }
-                resd = session.post(play_spin_api, data=data)
-                if resd.json()['code'] == 0:
-                    reward_list = resd.json()['data']['rewardLists']['rewardList']
-
-                    for reward in reward_list:
-                        logger.success(f"{self.session_name} | <c>[SPIN]</c> | <green>Successfully got <y>{reward['name']}</y>!</green>")
-
-                else:
-                    break
-
-                session.get(zombie_lvl_api)
-                res = session.get(stamina_api)
-                if res.json()['code'] == 0:
-                    stamina = res.json()['data']['staminaNow']
-                else:
-                    break
-
-    async def get_energy(self, session: cloudscraper.CloudScraper):
-        all_info = await self.get_info(session)
-        game_info = all_info.get("gameInfo")
-        return int(game_info.get('energySurplus'))
-
-    async def tap(self, hashCode, seq, collectAmmount, session: cloudscraper.CloudScraper):
-        data = {
-            "hashCode": hashCode,
-            "collectSeqNo": seq,
-            "collectAmount": collectAmmount
-        }
-        res = session.post(tap_api, data=data)
-        if res.json()['code'] == 0:
-            logger.success(f"{self.session_name} | <green>Successfully tapped - Earned <c>{collectAmmount}</c> coin</green>")
-            return res.json()['data']['collectSeqNo']
-        else:
-            logger.warning(f"{self.session_name} | Tap failed - {res.text}")
+            logger.warning(f"{self.session_name} | Unknown error during getting friends info: {e}")
             return None
-    async def auto_tap(self, session: cloudscraper.CloudScraper):
-        energy = await self.get_energy(session)
-        while energy > settings.MIN_ENERGY:
-            random_tap = randint(settings.RANDOM_TAP_TIMES[0], settings.RANDOM_TAP_TIMES[1])
-            claim_ammount = random_tap*self.coin_per_tap
-            hash_code = generate_hash(claim_ammount, self.seqNo)
-            seq = await self.tap(hashCode=hash_code, collectAmmount=claim_ammount, seq=self.seqNo, session=session)
-            if seq is None:
+
+    async def get_time_now(self, http_client: cloudscraper.CloudScraper):
+        try:
+            res = http_client.get(time_api)
+            if res.status_code == 200:
+                return True
+            else:
+                logger.warning(
+                    f"{self.session_name} | <yellow>Failed to get time: <red>{res.status_code}</red></yellow>")
+                return False
+
+        except Exception as e:
+            logger.warning(f"{self.session_name} | Unknown error during getting time: {e}")
+            return False
+
+    async def get_user_balance(self, http_client: cloudscraper.CloudScraper):
+        try:
+            res = http_client.get(user_balance_api)
+            if res.status_code == 200:
+                info = res.json()
+                return info
+            else:
+                logger.warning(
+                    f"{self.session_name} | <yellow>Failed to get user balance: <red>{res.status_code}</red></yellow>")
+                return None
+
+        except Exception as e:
+            logger.warning(f"{self.session_name} | Unknown error during getting account info: {e}")
+            return None
+
+    async def claim_daily_rw(self, http_client: cloudscraper.CloudScraper):
+        try:
+            res = http_client.get(daily_rw_api)
+            if res.status_code == 200:
+                info = res.json()
+                days = info['days'][-1]
+                claim = http_client.post(daily_rw_api)
+                if claim.status_code == 200:
+                    logger.success(
+                        f'{self.session_name} | <green>Successfully claimed daily rewards - Current streak: <cyan>{days["ordinal"]}</cyan></green>')
+            else:
+                logger.info(f"{self.session_name} | Daily rewards already claimed today!")
+
+        except Exception as e:
+            logger.warning(f"{self.session_name} | Unknown error during claiming daily rewards: {e}")
+
+    async def join_tribe(self, http_client: cloudscraper.CloudScraper):
+        try:
+            res = http_client.post(tribe_api)
+            if res.status_code == 200:
+                logger.success(f"{self.session_name} | <green>Successfully joined tribe!</green>")
+            else:
                 return
-            else:
-                self.seqNo = seq
-            sleep_time = randint(settings.SLEEP_BETWEEN_TAPS[0], settings.SLEEP_BETWEEN_TAPS[1])
-            energy = await self.get_energy(session)
-            logger.info(f"{self.session_name} | Energy left: <c>{energy}</c>")
-            logger.info(f"{self.session_name} | Sleep {sleep_time} seconds before continue...")
-            await asyncio.sleep(sleep_time)
 
-    async def run(self, proxy: str | None, ua: str) -> None:
-        access_token_created_time = 0
+        except Exception as e:
+            logger.warning(f"{self.session_name} | Unknown error during joining tribe: {e}")
+
+    async def get_tribe_info(self, http_client: cloudscraper.CloudScraper):
+        try:
+            res = http_client.get(tribe_info_api)
+            if res.status_code == 200:
+                return True
+            else:
+                return False
+
+        except Exception as e:
+            logger.warning(f"{self.session_name} | Unknown error during getting tribe info: {e}")
+            return False
+
+    async def check_dogs_eligible(self, http_client: cloudscraper.CloudScraper):
+        try:
+            res = http_client.get(dogs_eligible_api)
+            if res.status_code == 200:
+                eligible = res.json()
+                return eligible['eligible']
+            else:
+                return False
+
+        except Exception as e:
+            logger.warning(f"{self.session_name} | Unknown error during getting tribe info: {e}")
+            return False
+
+    async def start_farming(self, http_client: cloudscraper.CloudScraper):
+        try:
+            res = http_client.post(start_farm_api)
+            if res.status_code == 200:
+                logger.success(f"{self.session_name} | <green>Farm started successfully!</green>")
+                farm_info = res.json()
+                self.end_farm_time = farm_info['endTime']
+                return True
+            else:
+                logger.warning(
+                    f"{self.session_name} | <yellow>Failed to start farming: <red>{res.status_code}</red></yellow>")
+                return False
+
+        except Exception as e:
+            logger.warning(f"{self.session_name} | Unknown error during starting farm: {e}")
+            return False
+
+    async def claim_farm(self, farm_info, http_client: cloudscraper.CloudScraper):
+        try:
+            res = http_client.post(claim_farm_api)
+            if res.status_code == 200:
+                logger.success(f"{self.session_name} | Successfully claimed <cyan>{farm_info['balance']}</cyan> BP from farm")
+                await asyncio.sleep(5)
+                return await self.start_farming(http_client)
+            else:
+                logger.warning(
+                    f"{self.session_name} | <yellow>Failed to claim farming: <red>{res.status_code}</red></yellow>")
+                return False
+
+        except Exception as e:
+            logger.warning(f"{self.session_name} | Unknown error during claiming farm: {e}")
+            return False
+    async def get_task_list(self, http_client: cloudscraper.CloudScraper):
+        try:
+            res = http_client.get(tasks_api)
+            if res.status_code == 200:
+                tasks = res.json()
+                return tasks
+            else:
+                logger.warning(
+                    f"{self.session_name} | <yellow>Failed to start farming: <red>{res.status_code}</red></yellow>")
+                return None
+
+        except Exception as e:
+            logger.warning(f"{self.session_name} | Unknown error during getting tasks list: {e}")
+            return None
+
+    async def start_task(self, task, http_client: cloudscraper.CloudScraper):
+        url = f"{tasks_api}/{task['id']}/start"
+        try:
+            res = http_client.post(url)
+            if res.status_code == 200:
+                logger.info(f"{self.session_name} | <green>Successfully started task: <cyan>{task['title']}</cyan></green>")
+
+                return True
+            else:
+                logger.warning(
+                    f"{self.session_name} | <yellow>Failed to start <cyan>{task['title']}</cyan>: <red>{res.status_code}</red></yellow>")
+                return False
+
+        except Exception as e:
+            logger.warning(f"{self.session_name} | Unknown error during starting task: {e}")
+            return False
+
+    async def claim_task(self, task, http_client: cloudscraper.CloudScraper):
+        url = f"{tasks_api}/{task['id']}/claim"
+        try:
+            res = http_client.post(url)
+            if res.status_code == 200:
+                back = f"- Earned <cyan>{task['reward']}</cyan>" if task['reward'] != "0" else ""
+                logger.info(f"{self.session_name} | <green>Successfully claimed <cyan>{task['title']}</cyan> {back}</green>")
+                return True
+            else:
+                logger.warning(
+                    f"{self.session_name} | <yellow>Failed to claim <cyan>{task['title']}</cyan>: <red>{res.status_code}</red></yellow>")
+                return False
+
+        except Exception as e:
+            logger.warning(f"{self.session_name} | Unknown error during claiming task: {e}")
+            return False
+
+    async def validate_task(self, task, http_client: cloudscraper.CloudScraper):
+        url = f"{tasks_api}/{task['id']}/validate"
+        ans = requests.get("https://raw.githubusercontent.com/vanhbakaa/nothing/refs/heads/main/blum_ans.json")
+        answer = ans.json()
+        vid_ans = answer.get(task['id'])
+        if not vid_ans:
+            logger.info(f"{self.session_name} | Answer for {task['title']} not available yet!")
+            return
+        payload = {
+            "keyword": vid_ans
+        }
+        try:
+            res = http_client.post(url, json=payload)
+            if res.status_code == 200:
+                logger.success(f"{self.session_name} | <green>Task <cyan>{task['title']}</cyan> validate successfully, claiming...</green>")
+                return await self.claim_task(task, http_client)
+            else:
+                logger.warning(
+                    f"{self.session_name} | <yellow>Failed to validate <cyan>{task['title']}</cyan>: <red>{res.status_code}</red></yellow>")
+                return False
+
+        except Exception as e:
+            logger.warning(f"{self.session_name} | Unknown error during validating task: {e}")
+            return False
+
+    async def auto_task(self, http_client: cloudscraper.CloudScraper):
+        tasks = await self.get_task_list(http_client)
+        if tasks is None:
+            return
+        for section in tasks:
+            logger.info(f"{self.session_name} | Checking tasks in section type: <cyan>{section['sectionType']}</cyan>")
+            for task in section['tasks']:
+                if task['type'] == "ONCHAIN_TRANSACTION" or task['title'] == "Boost Blum" or task['status'] == "FINISHED" or task['kind'] == "ONGOING":
+                    continue
+                if "subTasks" in list(task.keys()):
+                    for subtask in task['subTasks']:
+                        if subtask['type'] == "ONCHAIN_TRANSACTION" or task['title'] == "Boost Blum" or task['status'] == "FINISHED":
+                            continue
+                        if subtask['status'] == "NOT_STARTED" and task['kind'] != "ONGOING":
+                            await self.start_task(subtask, http_client)
+                        elif subtask['status'] == "READY_FOR_CLAIM":
+                            await self.claim_task(subtask, http_client)
+                        await asyncio.sleep(randint(3, 5))
+
+                    continue
+            if len(section['subSections']) > 0:
+                for subsection in section['subSections']:
+                    if subsection['title'] == "New" or subsection['title'] == "OnChain":
+                        continue
+                    logger.info(f"{self.session_name} | Checking tasks in sub-section: {subsection['title']}")
+                    for task in subsection['tasks']:
+                        if task['type'] == "ONCHAIN_TRANSACTION" or task['title'] == "Boost Blum" or task['status'] == "FINISHED":
+                            continue
+                        if task['status'] == "NOT_STARTED" and task['kind'] != "ONGOING":
+                            await self.start_task(task, http_client)
+                        elif task['status'] == "READY_FOR_CLAIM":
+                            await self.claim_task(task, http_client)
+                        elif task['validationType'] == "KEYWORD" and task['status'] == "READY_FOR_VERIFY":
+                            await self.validate_task(task, http_client)
+
+                        await asyncio.sleep(randint(3, 5))
+
+    async def start_game(self, http_client: cloudscraper.CloudScraper):
+        try:
+            res = http_client.post(start_game_api)
+            if res.status_code == 200:
+                info = res.json()
+                logger.success(f"{self.session_name} | <green>Successfully start game! - ID: <cyan>{info['gameId']}</cyan></green>")
+                return info['gameId']
+            else:
+                logger.warning(
+                    f"{self.session_name} | <yellow>Failed to start game: <red>{res.status_code}</red></yellow>")
+                return None
+
+        except Exception as e:
+            logger.warning(f"{self.session_name} | Unknown error during start game: {e}")
+            return None
+
+    async def claim_friend(self, http_client: aiohttp.ClientSession):
+        try:
+            res = await http_client.post(friend_claim_api)
+            if res.status == 200:
+                return True
+            else:
+                logger.warning(
+                    f"{self.session_name} | <yellow>Failed to claim BP from ref: <red>{res.status}</red></yellow>")
+                return False
+
+        except Exception as e:
+            logger.warning(f"{self.session_name} | Unknown error during claiming BP from friends: {e}")
+            return None
+
+    async def claim_game(self, game_payload, points, http_client: cloudscraper.CloudScraper):
+        payload = {
+            "payload": game_payload
+        }
+        try:
+            res = http_client.post(claim_game_api, json=payload)
+            if res.status_code == 200:
+                logger.success(f"{self.session_name} | <green>Successfully claimed <cyan>{points}</cyan> BP from game!</green>")
+                return True
+            else:
+                print(res.text)
+                logger.warning(
+                    f"{self.session_name} | <yellow>Failed to claim game: <red>{res.status_code}</red></yellow>")
+                return False
+
+        except Exception as e:
+            logger.warning(f"{self.session_name} | Unknown error during claiming game: {e}")
+            return False
+
+    async def run(self, proxy: str | None, ua: str, token: dict | None) -> int | None:
         proxy_conn = ProxyConnector().from_url(proxy) if proxy else None
 
         headers["User-Agent"] = ua
@@ -616,19 +569,12 @@ class Tapper:
         http_client = CloudflareScraper(headers=headers, connector=proxy_conn)
 
         session = cloudscraper.create_scraper()
-        session.headers.update(headers)
 
         if proxy:
             proxy_check = await self.check_proxy(http_client=http_client, proxy=proxy)
             if proxy_check:
-                proxy_type = proxy.split(':')[0]
-                proxies = {
-                    proxy_type: proxy
-                }
-                session.proxies.update(proxies)
                 logger.info(f"{self.session_name} | bind with proxy ip: {proxy}")
 
-        token_live_time = randint(3400, 3600)
         while True:
             can_run = True
             try:
@@ -642,115 +588,102 @@ class Tapper:
                             "<yellow>Detected api change! Stopped the bot for safety. Contact me here to update the bot: https://t.me/vanhbakaaa</yellow>")
 
                 if can_run:
-
-                    if time() - access_token_created_time >= token_live_time:
+                    if token is None:
                         tg_web_data = await self.get_tg_web_data(proxy=proxy)
                         self.auth_token = tg_web_data
-                        access_token_created_time = time()
-                        token_live_time = randint(3400, 3600)
+                        await self.get_token(session)
+                    else:
+                        self.access_token = token['access']
+                        self.refresh_token = token['refresh']
 
-                    login_data = await self.login(session)
+                    if self.is_expired(self.access_token):
+                        await self.refresh_token_func(session, proxy)
 
-                    if login_data:
-                        session.headers.update({"Authorization": f"Bearer {login_data['token']}"})
+                    if self.access_token is None:
+                        return
+
+                    session.headers['Authorization'] = f"Bearer {self.access_token}"
 
 
-                        all_info = await self.get_info(session)
-                        if all_info is None:
-                            logger.warning(f"{self.session_name} | <yellow>Failed to get user info!</yellow>")
-                            await asyncio.sleep(30)
-                            return
-                        user_info = all_info.get("userInfo")
-                        game_info = all_info.get("gameInfo")
-                        tap_info = all_info.get("tapInfo")
-                        mine_info = all_info.get("mineInfo")
-                        self.seqNo = tap_info['collectInfo']['collectSeqNo']
-                        self.coin_per_tap = int(tap_info['tap']['value'])
+                    me_status = await self.get_basic_info(session)
+                    if me_status == 2 or me_status == 1:
+                        await asyncio.sleep(15)
+                        continue
 
-                        info_ = f"""
-                        =====<c>{self.session_name}</c>=====
-                        BASIC INFO
-                        ├── Total days in game: <red>{user_info['daysInGame']}</red>
-                        └── Friends invited: <c>{user_info['invitedFriendsCount']}</c>
-                        
-                        GAME INFO
-                        ├── Coin balance: <yellow>{game_info['coin']}</yellow>
-                        ├── Current level: <red>{game_info['level']}</red>
-                        ├── Experience: <green>{game_info['experience']}</green>
-                        └── Energy left: <red>{game_info['energySurplus']}</red>
-                        
-                        TAP INFO
-                        ├── Energy level: <c>{tap_info['energy']['level']}</c>
-                        ├── Recovery level: <c>{tap_info['recovery']['level']}</c>
-                        ├── Tap level: <c>{tap_info['tap']['level']}</c>
-                        └── Total bonus coin to collect: <yellow>{tap_info['autoCollectCoin']}</yellow>
-                        
-                        MINE INFO
-                        ├── Mine power: <c>{mine_info['minePower']}</c>
-                        └── Offline balace: <yellow>{mine_info['mineOfflineCoin']}</yellow>
-                        """
+                    tribe = await self.get_tribe_info(session)
+                    if tribe is False:
+                        await self.join_tribe(session)
 
-                        logger.info(info_)
+                    friend_info = await self.get_friend_balance(session)
+                    await self.get_time_now(session)
+                    if friend_info is None:
+                        await asyncio.sleep(15)
+                        continue
 
-                        await self.get_basic_info(session)
+                    await self.claim_daily_rw(session)
 
-                        await self.get_other_basic_info(session)
+                    user_balance_info = await self.get_user_balance(session)
+                    if user_balance_info is None:
+                        await asyncio.sleep(15)
+                        continue
+                    self.play_passes = user_balance_info['playPasses']
+                    self.user_balance = int(float(user_balance_info['availableBalance']))
 
-                        sign_status = await self.get_sign_status(session)
+                    self.dogs_eligible = await self.check_dogs_eligible(session)
+                    is_farming = False
+                    if "farming" in list(user_balance_info.keys()):
+                        is_farming = True
 
-                        if sign_status == 0:
-                            await self.claim_daily_rw(session)
+                    user_info = f"""
+                    ====<cyan>{self.session_name}</cyan>====
+                    USER INFO
+                        ├── BP Balance: <cyan>{self.user_balance}</cyan> BP
+                        ├── Total play passes: <cyan>{self.play_passes}</cyan>
+                        ├── Farming: <red>{is_farming}</red>
+                        └── Dogs drop: <red>{self.dogs_eligible}</red>
+                    
+                    FRENS INFO:
+                        ├── Total invited: <cyan>{friend_info['usedInvitation']}</cyan>
+                        ├── Amount for claim: <cyan>{friend_info['amountForClaim']}</cyan>
+                        └── Can claim: <red>{friend_info['canClaim']}</red>
+                    """
 
-                        if settings.AUTO_TASK:
-                            task_list = await self.get_task_list(session)
-                            for task in task_list:
-                                if task['isFinish'] == 1 or task['name'] in settings.BLACK_LIST_TASKS:
-                                    continue
+                    logger.info(user_info)
+                    await asyncio.sleep(5)
+                    if friend_info['canClaim']:
+                        a = await self.claim_friend(http_client)
+                        if a:
+                            logger.success(f"{self.session_name} | <green>Successfully claimed <cyan>{friend_info['amountForClaim']}</cyan> BP from friends</green>")
 
-                                if task['type'] == "fo_mo" or task['taskType'] == "transferTon" or task['type'] == "transferTon" or task['type'] == "telegram_share" or task['taskType'] == "fo_mo":
-                                    continue
+                    if not is_farming:
+                        await self.start_farming(session)
+                        await asyncio.sleep(5)
+                    else:
+                        self.end_farm_time = user_balance_info['farming']['endTime']
 
-                                if task['taskType'] == "pwd":
-                                    continue
+                    if int(time.time()*1000) >= self.end_farm_time:
+                        await self.claim_farm(user_balance_info['farming'], session)
+                        await asyncio.sleep(5)
 
-                                if task['name'] == "Join channel":
-                                    continue
+                    if settings.AUTO_TASK:
+                        await self.auto_task(session)
 
-                                await self.do_task(task, session)
-                                await asyncio.sleep(randint(3, 6))
-
-                        boxes_info = await self.get_boxes_info(session)
-                        if boxes_info:
-                            for box in boxes_info:
-                                if box['title'] == "Free Box":
-                                    if box['toDayNowUseNum'] == 0:
-                                        await self.buy_free_box(box, session)
-
-                        else:
-                            logger.warning(f"{self.session_name} | Failed to get box info...")
-
-                        in_gang = await self.check_gang(session)
-                        if in_gang is False and settings.AUTO_JOIN_GANG:
-                            await self.join_gang(settings.GANG_TO_JOIN, session)
-
-                        await self.upgrade_misc(tap_info, session)
-
-                        if settings.AUTO_UPGRADE_CARDS:
-                            while True:
-                                best_card = await self.get_best_available_card(session)
-                                if best_card is None:
-                                    break
-                                if len(best_card) == 0:
-                                    break
-                                await self.upgrade_card(best_card, session)
-                                await self.update_balance(session)
-                                await asyncio.sleep(randint(2, 5))
-
-                        if settings.AUTO_PLAY_SPIN:
-                            await self.play_spin(session)
-
-                        if settings.AUTO_TAP:
-                            await self.auto_tap(session)
+                    if settings.AUTO_GAME:
+                        game = randint(settings.GAME_PLAY_EACH_ROUND[0], settings.GAME_PLAY_EACH_ROUND[1])
+                        while self.play_passes > 0 and game > 0:
+                            points = randint(settings.MIN_POINTS, settings.MAX_POINTS)
+                            freeze = randint(1, 3)
+                            game_id = await self.start_game(session)
+                            if game_id is None:
+                                break
+                            payload = await get_payload(game_id, points, freeze)
+                            # print(payload)
+                            logger.info(f"{self.session_name} | Wait 30 seconds to complete game!...")
+                            await asyncio.sleep(30 + freeze*3)
+                            await self.claim_game(payload, points, session)
+                            self.play_passes -= 1
+                            game -= 1
+                            await asyncio.sleep(randint(5, 10))
                 else:
                     await asyncio.sleep(30)
                     continue
@@ -758,15 +691,15 @@ class Tapper:
                 logger.info(f"==<cyan>Completed {self.session_name}</cyan>==")
 
                 if self.multi_thread:
-                    sleep_ = round(random.uniform(settings.SLEEP_TIME_EACH_ROUND[0], settings.SLEEP_TIME_EACH_ROUND[1]),
-                                   1)
-
-                    logger.info(f"{self.session_name} | Sleep <red>{sleep_}</red> hours")
+                    sleep_ = (self.end_farm_time - int(time.time()*1000))//1000
+                    sleep_ /= 3600
+                    logger.info(f"{self.session_name} | Sleep <red>{round(sleep_, 1)}</red> hours")
                     await asyncio.sleep(sleep_ * 3600)
                 else:
                     await http_client.close()
-                    session.close()
-                    break
+                    sleep_ = (self.end_farm_time - int(time.time() * 1000)) // 1000
+                    sleep_ /= 3600
+                    return sleep_
             except InvalidSession as error:
                 raise error
 
@@ -774,42 +707,46 @@ class Tapper:
                 traceback.print_exc()
                 logger.error(f"{self.session_name} | Unknown error: {error}")
                 await asyncio.sleep(delay=randint(60, 120))
+                if self.multi_thread is False:
+                    return 10
 
 
 def get_():
-    actual = random.choices(["cmVmX1pXcDdQTHVR", "adwdwaf"], weights=[100, 0], k=1)
-    abasdowiad = base64.b64decode(actual[0])
+    actual = "cmVmX04ycU1WaHRFRDg="
+    abasdowiad = base64.b64decode(actual)
     waijdioajdioajwdwioajdoiajwodjawoidjaoiwjfoiajfoiajfojaowfjaowjfoajfojawofjoawjfioajwfoiajwfoiajwfadawoiaaiwjaijgaiowjfijawtext = abasdowiad.decode(
         "utf-8")
 
     return waijdioajdioajwdwioajdoiajwodjawoidjaoiwjfoiajfoiajfojaowfjaowjfoajfojawofjoawjfioajwfoiajwfoiajwfadawoiaaiwjaijgaiowjfijawtext
 
 
-async def run_tapper(tg_client: Client, proxy: str | None, ua: str):
+async def run_tapper(tg_client: Client, proxy: str | None, ua: str, token: dict | None):
     try:
         sleep_ = randint(1, 15)
         logger.info(f"{tg_client.name} | start after {sleep_}s")
-        await asyncio.sleep(sleep_)
-        await Tapper(tg_client=tg_client, multi_thread=True).run(proxy=proxy, ua=ua)
+        # await asyncio.sleep(sleep_)
+        await Tapper(tg_client=tg_client, multi_thread=True).run(proxy=proxy, ua=ua, token=token)
     except InvalidSession:
         logger.error(f"{tg_client.name} | Invalid Session")
 
 
 async def run_tapper1(tg_clients: list[Client]):
     while True:
+        Mintime = 10
         for tg_client in tg_clients:
             try:
-                await Tapper(tg_client=tg_client, multi_thread=False).run(
+                a = await Tapper(tg_client=tg_client, multi_thread=False).run(
                     proxy=await lc.get_proxy(tg_client.name),
-                    ua=await lc.get_user_agent(tg_client.name))
+                    ua=await lc.get_user_agent(tg_client.name),
+                    token=await lc.get_token(tg_client.name)
+                )
+                Mintime = min(a, Mintime)
             except InvalidSession:
                 logger.error(f"{tg_client.name} | Invalid Session")
 
             sleep_ = randint(settings.DELAY_EACH_ACCOUNT[0], settings.DELAY_EACH_ACCOUNT[1])
-            logger.info(f"Sleep {sleep_}s...")
+            logger.info(f"Sleep <cyan>{sleep_}</cyan> seconds")
             await asyncio.sleep(sleep_)
 
-        sleep_ = round(random.uniform(settings.SLEEP_TIME_EACH_ROUND[0], settings.SLEEP_TIME_EACH_ROUND[1]), 1)
-
-        logger.info(f"Sleep <red>{sleep_}</red> hours")
-        await asyncio.sleep(sleep_ * 3600)
+        logger.info(f"Sleep <red>{round(Mintime, 1)}</red> hours")
+        await asyncio.sleep(Mintime * 3600)
